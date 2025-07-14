@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Calendar, CreditCard, DollarSign, ShoppingBag, Trash2, Check, Plus, AlertCircle } from 'lucide-react';
 import Swal from 'sweetalert2';
+import { collection, getDocs, addDoc, doc, deleteDoc, updateDoc } from "firebase/firestore";
+import { db } from './firebase';
 import './App.css';
 
 const AddiDebtTracker = () => {
@@ -15,7 +17,36 @@ const AddiDebtTracker = () => {
 
   const MAX_CREDIT = 4500000;
 
-  // Cargar datos del estado interno (no usar localStorage en Claude)
+  // Cargar datos de Firebase al iniciar
+  useEffect(() => {
+    const loadPurchases = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, "purchases"));
+        const loadedPurchases = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          store: doc.data().store,
+          originalAmount: doc.data().originalAmount,
+          installments: doc.data().installments,
+          installmentValue: doc.data().installmentValue,
+          interestRate: doc.data().interestRate,
+          purchaseDate: doc.data().purchaseDate.toDate(),
+          firstPaymentDate: doc.data().firstPaymentDate.toDate(),
+          paidInstallments: doc.data().paidInstallments,
+          status: doc.data().status
+        }));
+        setPurchases(loadedPurchases);
+      } catch (error) {
+        console.error("Error cargando compras:", error);
+        Swal.fire({
+          title: 'Error',
+          text: 'No se pudieron cargar las compras',
+          icon: 'error'
+        });
+      }
+    };
+    loadPurchases();
+  }, []);
+
   useEffect(() => {
     const installments = parseInt(formData.installments);
     setFormData(prev => ({
@@ -41,7 +72,6 @@ const AddiDebtTracker = () => {
     const interestRate = parseFloat(formData.interestRate) || 0;
     const purchaseDate = new Date(formData.purchaseDate);
 
-    // Verificar si excede el crédito disponible
     if (amount > getAvailableCredit()) {
       Swal.fire({
         title: '¡Crédito insuficiente!',
@@ -53,7 +83,6 @@ const AddiDebtTracker = () => {
       return;
     }
 
-    // Calcular valor de la cuota
     let installmentValue;
     if (interestRate === 0) {
       installmentValue = amount / installments;
@@ -63,7 +92,6 @@ const AddiDebtTracker = () => {
                        (Math.pow(1 + monthlyRate, installments) - 1);
     }
 
-    // Fecha del primer pago
     let firstPaymentDate = new Date(purchaseDate);
     if (installments > 3) {
       firstPaymentDate.setMonth(firstPaymentDate.getMonth() + 1);
@@ -71,7 +99,6 @@ const AddiDebtTracker = () => {
     firstPaymentDate.setDate(19);
 
     const purchase = {
-      id: Date.now(),
       store: formData.store,
       originalAmount: amount,
       installments: installments,
@@ -83,23 +110,32 @@ const AddiDebtTracker = () => {
       status: 'active'
     };
 
-    setPurchases(prev => [...prev, purchase]);
-    setFormData({
-      store: '',
-      amount: '',
-      installments: '3',
-      interestRate: '0',
-      purchaseDate: new Date().toISOString().split('T')[0]
-    });
+    try {
+      const docRef = await addDoc(collection(db, "purchases"), purchase);
+      setPurchases(prev => [...prev, { ...purchase, id: docRef.id }]);
+      setFormData({
+        store: '',
+        amount: '',
+        installments: '3',
+        interestRate: '0',
+        purchaseDate: new Date().toISOString().split('T')[0]
+      });
 
-    // Mostrar confirmación de éxito
-    Swal.fire({
-      title: '¡Compra registrada!',
-      text: `Se ha registrado tu compra en ${formData.store} por ${formatCurrency(amount)} en ${installments} cuotas`,
-      icon: 'success',
-      confirmButtonText: 'Perfecto',
-      confirmButtonColor: '#4CAF50'
-    });
+      Swal.fire({
+        title: '¡Compra registrada!',
+        text: `Se ha registrado tu compra en ${formData.store} por ${formatCurrency(amount)} en ${installments} cuotas`,
+        icon: 'success',
+        confirmButtonText: 'Perfecto',
+        confirmButtonColor: '#4CAF50'
+      });
+    } catch (error) {
+      console.error("Error agregando compra:", error);
+      Swal.fire({
+        title: 'Error',
+        text: 'No se pudo registrar la compra',
+        icon: 'error'
+      });
+    }
   };
 
   const deletePurchase = async (id) => {
@@ -117,15 +153,25 @@ const AddiDebtTracker = () => {
     });
 
     if (result.isConfirmed) {
-      setPurchases(prev => prev.filter(p => p.id !== id));
-      
-      Swal.fire({
-        title: '¡Eliminado!',
-        text: 'La compra ha sido eliminada correctamente',
-        icon: 'success',
-        confirmButtonText: 'Perfecto',
-        confirmButtonColor: '#4CAF50'
-      });
+      try {
+        await deleteDoc(doc(db, "purchases", id));
+        setPurchases(prev => prev.filter(p => p.id !== id));
+        
+        Swal.fire({
+          title: '¡Eliminado!',
+          text: 'La compra ha sido eliminada correctamente',
+          icon: 'success',
+          confirmButtonText: 'Perfecto',
+          confirmButtonColor: '#4CAF50'
+        });
+      } catch (error) {
+        console.error("Error eliminando compra:", error);
+        Swal.fire({
+          title: 'Error',
+          text: 'No se pudo eliminar la compra',
+          icon: 'error'
+        });
+      }
     }
   };
 
@@ -145,36 +191,49 @@ const AddiDebtTracker = () => {
     });
 
     if (result.isConfirmed) {
-      setPurchases(prev => prev.map(p => {
-        if (p.id === id && p.paidInstallments < p.installments) {
-          const newPaidInstallments = p.paidInstallments + 1;
-          return {
-            ...p,
-            paidInstallments: newPaidInstallments,
-            status: newPaidInstallments === p.installments ? 'paid' : 'active'
-          };
-        }
-        return p;
-      }));
-
       const newPaidInstallments = purchase.paidInstallments + 1;
       const isCompleted = newPaidInstallments === purchase.installments;
       
-      if (isCompleted) {
-        Swal.fire({
-          title: '¡Compra completada! 🎉',
-          text: `Has pagado todas las cuotas de ${purchase.store}. ¡Felicitaciones!`,
-          icon: 'success',
-          confirmButtonText: 'Genial',
-          confirmButtonColor: '#4CAF50'
+      try {
+        await updateDoc(doc(db, "purchases", id), {
+          paidInstallments: newPaidInstallments,
+          status: isCompleted ? 'paid' : 'active'
         });
-      } else {
+
+        setPurchases(prev => prev.map(p => {
+          if (p.id === id) {
+            return {
+              ...p,
+              paidInstallments: newPaidInstallments,
+              status: isCompleted ? 'paid' : 'active'
+            };
+          }
+          return p;
+        }));
+
+        if (isCompleted) {
+          Swal.fire({
+            title: '¡Compra completada! 🎉',
+            text: `Has pagado todas las cuotas de ${purchase.store}. ¡Felicitaciones!`,
+            icon: 'success',
+            confirmButtonText: 'Genial',
+            confirmButtonColor: '#4CAF50'
+          });
+        } else {
+          Swal.fire({
+            title: '¡Pago registrado!',
+            text: `Pago de ${formatCurrency(purchase.installmentValue)} registrado. Te faltan ${remainingInstallments - 1} cuotas.`,
+            icon: 'success',
+            confirmButtonText: 'Perfecto',
+            confirmButtonColor: '#4CAF50'
+          });
+        }
+      } catch (error) {
+        console.error("Error registrando pago:", error);
         Swal.fire({
-          title: '¡Pago registrado!',
-          text: `Pago de ${formatCurrency(purchase.installmentValue)} registrado. Te faltan ${remainingInstallments - 1} cuotas.`,
-          icon: 'success',
-          confirmButtonText: 'Perfecto',
-          confirmButtonColor: '#4CAF50'
+          title: 'Error',
+          text: 'No se pudo registrar el pago',
+          icon: 'error'
         });
       }
     }
@@ -202,7 +261,6 @@ const AddiDebtTracker = () => {
     return paymentDate.toLocaleDateString('es-CO');
   };
 
-  // Función mejorada para obtener pagos de los próximos meses
   const getPaymentsByMonth = () => {
     const today = new Date();
     const payments = {};
@@ -241,15 +299,14 @@ const AddiDebtTracker = () => {
       }
     });
 
-    // Convertir a array y ordenar por fecha
     return Object.values(payments)
       .sort((a, b) => a.date - b.date)
-      .slice(0, 6); // Mostrar solo los próximos 6 meses
+      .slice(0, 6);
   };
 
   const getNextTwoMonthsPayments = () => {
     const allPayments = getPaymentsByMonth();
-    return allPayments.slice(0, 2); // Solo los próximos 2 meses
+    return allPayments.slice(0, 2);
   };
 
   const formatCurrency = (amount) => {
@@ -275,7 +332,7 @@ const AddiDebtTracker = () => {
             <CreditCard size={48} color="#4CAF50" />
             Control de Deudas Addi
           </h1>
-          <p className="header-subtitle">Love Like Ours Can Never</p>
+          <p className="header-subtitle">Love Like Ours Can Never Die</p>
         </div>
 
         {/* Summary Cards */}
